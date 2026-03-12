@@ -143,6 +143,32 @@ class TestDecomposition:
         r = classify_command("cat file|grep foo|wc -l")
         assert len(r.stages) == 3
 
+    def test_grep_alternation_not_split(self, project_root):
+        """grep with quoted alternation pattern must not split on |."""
+        r = classify_command('grep "foo\\|bar" file.txt')
+        assert r.final_decision == "allow"
+        assert len(r.stages) == 1
+
+    def test_grep_alternation_piped_to_head(self, project_root):
+        """grep alternation piped to head must produce 2 stages, not N."""
+        r = classify_command('grep -n "foo\\|bar\\|baz" file.txt | head -20')
+        assert r.final_decision == "allow"
+        assert len(r.stages) == 2
+
+    def test_grep_alternation_multi_pipe(self, project_root):
+        """Real-world: grep with alternation piped through grep and head."""
+        r = classify_command(
+            'grep -n "startBridgeServer\\|moduleAppContext\\|onboarding" '
+            '/path/to/file.ts | grep -A2 "app.whenReady" | head -40'
+        )
+        assert r.final_decision == "allow"
+        assert len(r.stages) == 3
+
+    def test_quoted_semicolon_not_split(self, project_root):
+        """Semicolons inside quoted strings are not shell operators."""
+        r = classify_command('echo "hello;world"')
+        assert len(r.stages) == 1
+
     def test_redirect_to_sensitive(self, project_root):
         r = classify_command('echo "data" > ~/.bashrc')
         assert r.final_decision == "ask"

