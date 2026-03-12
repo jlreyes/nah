@@ -5,6 +5,5 @@
   "ruby -e",
   "perl -e",
   "php -r",
-  "gh api",
   "gh extension exec"
 ]

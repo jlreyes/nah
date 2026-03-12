@@ -918,9 +918,47 @@ class TestGhCommands:
     def test_gh_filesystem_write(self, tokens):
         assert _ct(tokens) == "filesystem_write"
 
-    # lang_exec — runs arbitrary code
+    # gh api graphql — read-only queries are git_safe
     @pytest.mark.parametrize("tokens", [
-        ["gh", "api", "/repos/owner/repo"],
+        ["gh", "api", "graphql", "-f", "query={ repository(owner: \"o\", name: \"r\") { id } }"],
+        ["gh", "api", "graphql", "-f", "query={ viewer { login } }", "--jq", ".data.viewer.login"],
+        ["gh", "api", "graphql", "-F", "query={ search(query: \"test\", type: ISSUE, first: 10) { nodes { ... on Issue { title } } } }"],
+        ["gh", "api", "graphql", "-f", "query={ repository { pullRequest(number: 1) { reviewThreads(first: 50) { nodes { id } } } } }"],
+        # variables alongside query are still read-only
+        ["gh", "api", "graphql", "-f", "query={ repository(owner: $o) { id } }", "-f", "o=owner"],
+    ])
+    def test_gh_api_graphql_read(self, tokens):
+        assert _ct(tokens) == "git_safe"
+
+    # gh api graphql — mutations are network_write
+    @pytest.mark.parametrize("tokens", [
+        ["gh", "api", "graphql", "-f", "query=mutation { addComment(input: {subjectId: \"id\", body: \"hi\"}) { commentEdge { node { id } } } }"],
+        ["gh", "api", "graphql", "-f", "query=mutation AddReaction($input: AddReactionInput!) { addReaction(input: $input) { reaction { content } } }"],
+    ])
+    def test_gh_api_graphql_mutation(self, tokens):
+        assert _ct(tokens) == "network_write"
+
+    # gh api (REST) — data flags still escalate to network_write
+    @pytest.mark.parametrize("tokens", [
+        ["gh", "api", "/repos/owner/repo/issues", "-f", "title=bug"],
+        ["gh", "api", "/repos/owner/repo/issues", "-X", "POST"],
+        ["gh", "api", "/repos/owner/repo", "--input", "data.json"],
+    ])
+    def test_gh_api_rest_write(self, tokens):
+        assert _ct(tokens) == "network_write"
+
+    # gh api (REST) — no data/method flags is git_safe
+    @pytest.mark.parametrize("tokens", [
+        ["gh", "api", "/repos/owner/repo", "--jq", ".name"],
+    ])
+    def test_gh_api_rest_read(self, tokens):
+        assert _ct(tokens) == "git_safe"
+
+    # lang_exec — runs arbitrary code
+    # Note: "gh api /repos/..." is classified by the flag classifier (Phase 2)
+    # as git_safe for read-only REST calls, so it never reaches the lang_exec
+    # prefix table. Only gh extension exec is truly lang_exec.
+    @pytest.mark.parametrize("tokens", [
         ["gh", "extension", "exec", "my-ext"],
     ])
     def test_gh_lang_exec(self, tokens):

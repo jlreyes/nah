@@ -607,12 +607,21 @@ _GH_API_DATA_LONG_PREFIXES = ("--input=", "--raw-field=", "--field=")
 
 
 def _classify_gh_api(tokens: list[str]) -> str | None:
-    """Flag-dependent: gh api with write method/data → network_write; else → git_safe."""
+    """Flag-dependent: gh api with write method/data → network_write; else → git_safe.
+
+    Special case: ``gh api graphql -f query='{ ... }'`` is a read unless the
+    query body contains ``mutation``.  The ``-f``/``--field`` flags are required
+    by ``gh api graphql`` to pass the query string, so their mere presence
+    should not escalate a read-only query to ``network_write``.
+    """
     if len(tokens) < 2 or tokens[0] != "gh" or tokens[1] != "api":
         return None
 
+    is_graphql = len(tokens) > 2 and tokens[2] == "graphql"
+
     has_write_method = False
     has_data = False
+    has_graphql_mutation = False
 
     i = 2
     while i < len(tokens):
@@ -625,18 +634,37 @@ def _classify_gh_api(tokens: list[str]) -> str | None:
             continue
 
         if tok in _GH_API_DATA_FLAGS:
+            if is_graphql and i + 1 < len(tokens):
+                val = tokens[i + 1]
+                if val.startswith("query="):
+                    # -f query='{ repository { ... } }' → read
+                    # -f query='mutation { ... }' → write
+                    if "mutation" in val.lower():
+                        has_graphql_mutation = True
+                    i += 2
+                    continue
             has_data = True
             i += 2
             continue
 
         if any(tok.startswith(p) for p in _GH_API_DATA_LONG_PREFIXES):
+            if is_graphql and tok.startswith(("--field=query=", "--raw-field=query=", "-f=query=")):
+                if "mutation" in tok.lower():
+                    has_graphql_mutation = True
+                i += 1
+                continue
             has_data = True
             i += 1
             continue
 
         i += 1
 
-    if has_data or has_write_method:
+    if has_write_method or has_graphql_mutation:
+        return NETWORK_WRITE
+    if is_graphql:
+        # graphql with only query/variable -f flags is a read
+        return GIT_SAFE
+    if has_data:
         return NETWORK_WRITE
     return GIT_SAFE
 
