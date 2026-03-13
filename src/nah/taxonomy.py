@@ -600,6 +600,41 @@ def _classify_httpie(tokens: list[str]) -> str | None:
     return NETWORK_OUTBOUND
 
 
+def _is_trusted_gh_repo(tokens: list[str]) -> bool:
+    """Check if gh api tokens target a trusted GitHub repo.
+
+    Matches the API path (tokens[2]) against trusted_gh_repos config entries.
+    Entries can be "owner/repo" or just "owner" (trusts all repos for that owner).
+    """
+    if len(tokens) < 3:
+        return False
+    api_path = tokens[2]
+    # Extract owner/repo from "repos/{owner}/{repo}/..."
+    if not api_path.startswith("repos/"):
+        return False
+    parts = api_path.split("/")
+    if len(parts) < 3:
+        return False
+    owner, repo = parts[1], parts[2]
+
+    try:
+        from nah.config import get_config
+        trusted = get_config().trusted_gh_repos
+    except Exception:
+        return False
+
+    for entry in trusted:
+        if "/" in entry:
+            # owner/repo match
+            if entry == f"{owner}/{repo}":
+                return True
+        else:
+            # owner-only match
+            if entry == owner:
+                return True
+    return False
+
+
 _GH_API_WRITE_FLAGS = {"--method", "-X"}
 _GH_API_WRITE_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
 _GH_API_DATA_FLAGS = {"--input", "-f", "--raw-field", "-F", "--field"}
@@ -659,14 +694,16 @@ def _classify_gh_api(tokens: list[str]) -> str | None:
 
         i += 1
 
-    if has_write_method or has_graphql_mutation:
-        return NETWORK_WRITE
-    if is_graphql:
-        # graphql with only query/variable -f flags is a read
+    is_write = has_write_method or has_graphql_mutation or (has_data and not is_graphql)
+    if not is_write:
         return GIT_SAFE
-    if has_data:
-        return NETWORK_WRITE
-    return GIT_SAFE
+
+    # Write operation — check if targeting a trusted GitHub repo.
+    # API path is typically tokens[2]: "repos/{owner}/{repo}/..."
+    if _is_trusted_gh_repo(tokens):
+        return GIT_WRITE
+
+    return NETWORK_WRITE
 
 
 def _classify_global_install(tokens: list[str]) -> str | None:

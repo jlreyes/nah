@@ -1,5 +1,6 @@
 """Bash command classifier — tokenize, decompose, classify, compose."""
 
+import re
 import shlex
 import sys
 from dataclasses import dataclass, field
@@ -124,6 +125,20 @@ def classify_command(command: str) -> ClassifyResult:
     return result
 
 
+_FD_REDIRECT_RE = re.compile(r"^(\d)(>>?)(.+)$")
+
+
+def _split_fd_redirect(tok: str) -> tuple[str, str, bool] | None:
+    """Match a glued fd redirect like '2>/dev/null' or '2>>err.log'.
+
+    Returns (fd, target, is_append) or None.
+    """
+    m = _FD_REDIRECT_RE.match(tok)
+    if m:
+        return m.group(1), m.group(3), m.group(2) == ">>"
+    return None
+
+
 def _decompose(tokens: list[str]) -> list[Stage]:
     """Split tokens on |, &&, ||, ; operators. Detect > / >> redirects."""
     stages: list[Stage] = []
@@ -154,15 +169,44 @@ def _decompose(tokens: list[str]) -> list[Stage]:
             i += 1
             continue
 
+        # Glued fd redirect: "2>/dev/null", "2>>err.log", etc.
+        # shlex keeps these as one token since the digit isn't punctuation.
+        # Split into fd + redirect so the digit doesn't become a spurious command.
+        glued = _split_fd_redirect(tok)
+        if glued:
+            _fd, target, append = glued
+            stage = _make_stage(current_tokens, "")
+            if stage:
+                stage.redirect_target = target
+                stage.redirect_append = append
+                stages.append(stage)
+            elif stages:
+                # Orphaned fd redirect (e.g., `cmd \; 2>/dev/null`)
+                stages[-1].redirect_target = target
+                stages[-1].redirect_append = append
+            current_tokens = []
+            i += 1
+            continue
+
         # Redirect detection: > or >>
         if tok in (">", ">>"):
             redirect_append = tok == ">>"
             target = tokens[i + 1] if i + 1 < len(tokens) else ""
+
+            # Detect fd redirect prefix: single digit before > (e.g., `cmd 2 > /dev/null`
+            # when tokenized with spaces). Pop so it doesn't become a spurious command.
+            if current_tokens and len(current_tokens[-1]) == 1 and current_tokens[-1].isdigit():
+                current_tokens.pop()
+
             stage = _make_stage(current_tokens, "")
             if stage:
                 stage.redirect_target = target
                 stage.redirect_append = redirect_append
                 stages.append(stage)
+            elif stages:
+                # Orphaned fd redirect — attach to previous stage.
+                stages[-1].redirect_target = target
+                stages[-1].redirect_append = redirect_append
             current_tokens = []
             i += 2  # skip target
             continue
@@ -271,6 +315,44 @@ def _strip_command_builtin(tokens: list[str]) -> list[str] | None:
     return None
 
 
+# xargs flags that consume the next token as a value.
+_XARGS_VALUE_FLAGS = {"-n", "-P", "-I", "-d", "-L", "-s", "-a", "-E",
+                      "--max-args", "--max-procs", "--replace", "--delimiter",
+                      "--max-lines", "--max-chars", "--arg-file", "--eof"}
+
+# xargs flags that are standalone (no value).
+_XARGS_BOOLEAN_FLAGS = {"-0", "--null", "-t", "--verbose", "-p", "--interactive",
+                        "-r", "--no-run-if-empty", "-x", "--exit", "--show-limits",
+                        "--process-slot-var"}
+
+
+def _strip_xargs_flags(tokens: list[str]) -> list[str] | None:
+    """Strip xargs and its flags, returning the inner command tokens.
+
+    Returns None for bare xargs (no command specified).
+    """
+    i = 1  # skip "xargs"
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in _XARGS_VALUE_FLAGS:
+            i += 2  # skip flag + its value
+        elif tok in _XARGS_BOOLEAN_FLAGS:
+            i += 1
+        elif tok.startswith("--") and "=" in tok:
+            # --max-args=5, --delimiter='\n', etc.
+            i += 1
+        elif tok == "--":
+            # Explicit end of xargs flags
+            return tokens[i + 1:] if i + 1 < len(tokens) else None
+        elif tok.startswith("-"):
+            # Unknown flag — skip conservatively
+            i += 1
+        else:
+            # First non-flag token = the command xargs will execute
+            return tokens[i:]
+    return None
+
+
 def _unwrap_shell(
     stage: Stage,
     depth: int,
@@ -296,6 +378,21 @@ def _unwrap_shell(
                                    builtin_table=builtin_table, project_table=project_table,
                                    user_actions=user_actions, profile=profile)
         return None  # Introspection or bare — fall through to classify
+
+    # xargs command multiplier — classify by the command it will execute
+    if tokens and tokens[0] == "xargs":
+        inner = _strip_xargs_flags(tokens)
+        if inner:
+            inner_stage = Stage(tokens=inner, operator=stage.operator)
+            return _classify_stage(inner_stage, depth + 1, global_table=global_table,
+                                   builtin_table=builtin_table, project_table=project_table,
+                                   user_actions=user_actions, profile=profile)
+        # Bare xargs (no command → defaults to /bin/echo) → filesystem_read
+        sr = StageResult(tokens=tokens)
+        sr.action_type = taxonomy.FILESYSTEM_READ
+        sr.default_policy = taxonomy.get_policy(taxonomy.FILESYSTEM_READ, user_actions)
+        _apply_policy(sr)
+        return sr
 
     is_wrapper, inner = taxonomy.is_shell_wrapper(tokens)
     if not is_wrapper or inner is None:
@@ -379,7 +476,7 @@ def _apply_policy(sr: StageResult) -> None:
 
 def _check_redirect(target: str) -> tuple[str, str]:
     """Check redirect target as a filesystem write."""
-    if not target:
+    if not target or target == "/dev/null":
         return taxonomy.ALLOW, ""
     resolved = paths.resolve_path(target)
 

@@ -329,6 +329,91 @@ class TestCommandUnwrap:
         assert r.final_decision == "ask"
 
 
+# --- xargs unwrap ---
+
+
+class TestXargsUnwrap:
+    """xargs must unwrap to classify by the command it will execute."""
+
+    def test_xargs_grep(self, project_root):
+        r = classify_command("xargs grep -l 'pattern'")
+        assert r.stages[0].action_type == "filesystem_read"
+        assert r.final_decision == "allow"
+
+    def test_xargs_rm(self, project_root):
+        r = classify_command("xargs rm -rf")
+        assert r.stages[0].action_type == "filesystem_delete"
+
+    def test_xargs_cat(self, project_root):
+        r = classify_command("xargs cat")
+        assert r.stages[0].action_type == "filesystem_read"
+        assert r.final_decision == "allow"
+
+    def test_xargs_with_flags(self, project_root):
+        """xargs -0 -n 1 grep -l 'pattern' → strips flags, classifies grep."""
+        r = classify_command("xargs -0 -n 1 grep -l 'pattern'")
+        assert r.stages[0].action_type == "filesystem_read"
+        assert r.final_decision == "allow"
+
+    def test_xargs_with_I_flag(self, project_root):
+        r = classify_command("xargs -I {} grep -l 'pattern' {}")
+        assert r.stages[0].action_type == "filesystem_read"
+        assert r.final_decision == "allow"
+
+    def test_xargs_with_long_flags(self, project_root):
+        r = classify_command("xargs --max-args=5 --null grep 'pattern'")
+        assert r.stages[0].action_type == "filesystem_read"
+        assert r.final_decision == "allow"
+
+    def test_xargs_double_dash(self, project_root):
+        """xargs -- rm → explicit end of flags."""
+        r = classify_command("xargs -- rm -rf")
+        assert r.stages[0].action_type == "filesystem_delete"
+
+    def test_bare_xargs(self, project_root):
+        """Bare xargs defaults to echo → filesystem_read."""
+        r = classify_command("xargs")
+        assert r.stages[0].action_type == "filesystem_read"
+        assert r.final_decision == "allow"
+
+    def test_xargs_bash(self, project_root):
+        """xargs bash → unknown (bare bash is unclassified) → ask."""
+        r = classify_command("xargs bash")
+        assert r.stages[0].action_type == "unknown"
+        assert r.final_decision == "ask"
+
+    def test_pipe_find_xargs_grep(self, project_root):
+        """find | xargs grep → both filesystem_read → allow."""
+        r = classify_command("find . -name '*.tsx' | xargs grep -l 'pattern'")
+        assert r.final_decision == "allow"
+        assert len(r.stages) == 2
+        assert r.stages[0].action_type == "filesystem_read"
+        assert r.stages[1].action_type == "filesystem_read"
+
+    def test_pipe_find_xargs_rm(self, project_root):
+        """find | xargs rm → filesystem_read + filesystem_delete."""
+        r = classify_command("find . -name '*.tmp' | xargs rm")
+        assert len(r.stages) == 2
+        assert r.stages[0].action_type == "filesystem_read"
+        assert r.stages[1].action_type == "filesystem_delete"
+
+    def test_xargs_unknown_inner(self, project_root):
+        """xargs with unknown command → unknown → ask."""
+        r = classify_command("xargs some_unknown_tool")
+        assert r.stages[0].action_type == "unknown"
+        assert r.final_decision == "ask"
+
+    def test_xargs_git_status(self, project_root):
+        r = classify_command("xargs git status")
+        assert r.stages[0].action_type == "git_safe"
+        assert r.final_decision == "allow"
+
+    def test_xargs_curl(self, project_root):
+        """xargs curl → network_outbound → context-resolved."""
+        r = classify_command("xargs curl")
+        assert r.stages[0].action_type == "network_outbound"
+
+
 # --- Path extraction ---
 
 

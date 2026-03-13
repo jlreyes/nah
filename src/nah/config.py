@@ -36,6 +36,7 @@ class NahConfig:
     llm_max_decision: str = "ask"  # default: LLM can't escalate past ask
     llm_eligible: str | list = "default"
     trusted_paths: list[str] = field(default_factory=list)
+    trusted_gh_repos: list[str] = field(default_factory=list)
     db_targets: list[dict] = field(default_factory=list)
     log: dict = field(default_factory=dict)
 
@@ -284,6 +285,11 @@ def _merge_configs(global_cfg: dict, project_cfg: dict) -> NahConfig:
     g_trusted = global_cfg.get("trusted_paths", [])
     if isinstance(g_trusted, list):
         config.trusted_paths = [str(p) for p in g_trusted]
+
+    # trusted_gh_repos: global config ONLY — owner/repo prefixes for gh api writes
+    g_gh_repos = global_cfg.get("trusted_gh_repos", [])
+    if isinstance(g_gh_repos, list):
+        config.trusted_gh_repos = [str(r) for r in g_gh_repos]
 
     # db_targets: global config ONLY — project .nah.yaml silently ignored
     g_targets = global_cfg.get("db_targets", [])
