@@ -18,6 +18,32 @@
 
 ---
 
+## Fork changes
+
+This is a fork of [manuelschipper/nah](https://github.com/manuelschipper/nah) with the following additions:
+
+**Active allow decisions** — Upstream nah stays silent on allowed tool calls, which lets Claude Code's own permission system still prompt you. This fork emits `permissionDecision: "allow"` so nah-approved commands bypass redundant prompts.
+
+**`gh api` flag classifier** — Classifies `gh api` calls by HTTP method and data flags instead of treating them all as `lang_exec`. Read-only calls (`gh api repos/...`) → `git_safe`. Mutating calls (`-f body=...`, `-X POST`) → `network_write`. GraphQL queries with `-f query='...'` are correctly detected as reads unless the body contains `mutation`.
+
+**`trusted_gh_repos` config** — Write operations to trusted repos classify as `git_write` (auto-allowed) instead of `network_write` (always asks). Supports `owner/repo` or bare `owner` entries:
+
+```yaml
+trusted_gh_repos:
+- my-org/my-repo
+- my-org          # trusts all repos under this owner
+```
+
+**fd redirect parsing** — Fixes `2>/dev/null` being parsed as a separate stage where `2` becomes an unknown command. Handles both glued (`2>/dev/null`) and spaced (`2 > /dev/null`) forms. Orphaned fd redirects (e.g., after `\;` in `find -exec`) attach to the previous stage.
+
+**`/dev/null` redirect skip** — Redirects to `/dev/null` no longer trigger the filesystem write boundary check.
+
+**Tokenizer fix for quoted operators** — Uses `shlex` `punctuation_chars` mode so quoted shell operators (e.g., `grep "foo|bar"`) stay as single tokens instead of splitting into separate pipeline stages.
+
+**`xargs` unwrap** — `xargs grep`, `xargs rm`, etc. are classified by the inner command, not as `unknown`. Strips xargs flags (`-0`, `-n`, `-I`, `--`) to find the real command.
+
+---
+
 ## The problem
 
 Claude Code’s permission system is allow-or-deny per tool, but that doesn’t really scale. Deleting some files is fine sometimes. And git checkout is sometimes catastrophic. Even when you curate permissions, 200 IQ Opus can find a way around it. Maintaining a deny list is a fool’s errand.
